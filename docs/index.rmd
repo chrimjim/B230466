@@ -1,11 +1,14 @@
 ---
 title: "Assessment"
-output: html_document
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
 date: "2024-11-01"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
 
 ## R Markdown
@@ -14,7 +17,7 @@ This is an R Markdown document. Markdown is a simple formatting syntax for autho
 
 When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
-```{r cars}
+```{r cars, echo=FALSE}
 summary(cars)
 ```
 
@@ -27,3 +30,185 @@ plot(pressure)
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+
+Title: "A look at the 5 year trend of Opioid Substitution Therapy each quarter across Scotland, focusing on NHS Lothian and noting the impact of COVID-19 pandemic."
+
+
+Introduction:
+Within Scotland, there is an ongoing public health emergency in regards to drug related deaths, and these consistently involve opioids. Opioid substitution therapy is the standard of care for opioid dependence, using mainly methadone but also buprenorphine. 
+
+Methadone appears as the most prescribed drug in Scottish Health datasets, so I was curious to understand the trend in the number of prescriptions for opioid substitutes over the last 5 years, and to see whether the COVID-19 pandemic causes these numbers to change at all, especially considering lockdown measures only offered a barrier to healthcare engagement for most people.
+
+First, I installed (if necessary) and loaded all the packages I thought would be relevant to my investigations.
+```{r loading packages, echo=TRUE, include=FALSE}
+library(tidyverse)
+library(here)
+library(janitor)
+library(ggpubr)
+library(gt)
+library(kableExtra)
+library(gridExtra)
+```
+
+Loading in all the prescription data from my years of interest (2018-2023). I chose these 5 years as they were the most recent - considering I want data from each quarter, I cannot use 2024 datasets as they are not complete yet. 
+
+I am already familiar with the data, and already know the specific medications I wish to look at, so to save time, I will apply a filter to all datasets I want to load in. To save space in my environment tab, I will also add all the filtered datasets I wish to use into only one dataframe that I can then access from my environment.
+
+ALL DATA CAN BE DOWNLOADED FROM THIS URL: https://www.opendata.nhs.scot/dataset/prescriptions-in-the-community
+-- ONLY DATA CORRESPONDING TO FEB, MAY, AUG, NOV OF 2018-2023
+
+```{r loading data}
+#OSP = Opioid Substitution Prescriptions
+OSP <- c("BUPRENORPHINE", "METHADONE")
+
+paste(OSP, collapse = "|")
+
+QuartPrescriptionFiles <- list.files(here("data", "QuarterlyPrescription2018_2023"), pattern = "csv", full.names = TRUE)
+
+ReadFiles <- function(file_name) {
+  read_csv(file_name, show_col_types = FALSE, col_types = cols(.default = "c")) %>%
+    filter(str_detect(BNFItemDescription, paste(OSP, collapse = "|"))) 
+} #Applying a filter to all datasets I want to load in that only keeps data pertaining to buprenorphine and methadone prescriptions
+
+ScotQP <- QuartPrescriptionFiles %>% 
+  map_dfr(ReadFiles)
+
+ScotQP
+```
+In order to join all the files into one dataframe, I had to have their data types be the same (characters in this case). 
+
+Before moving on, I'll get R to detect their original data type and revert them back. I will create a new object, just in case there is any data loss, or the conversions seem wrong, though I doubt this will be the case.
+
+I also notice that HBT and HBT2014 are two separate columns giving me the same values and producing NAs in certain regions. I will have to combine both HBT2014 and HBT values into one column to avoid this affecting future objects. 
+
+```{r cleaning}
+ScotQP <- type.convert(ScotQP, as.is = TRUE)
+#Seems about right. 
+
+HB_fixed <- ScotQP %>%
+  mutate(HB = coalesce(HBT2014, HBT))%>%
+  select(-HBT, -HBT2014) #When I join healthboard data, these columns will clash, so removing them now for ease since I have made the combined column
+
+```
+
+Now to join the dataframe with the healthboard data, which provides healthboard names that link with the healthboard codes in the original dataset.
+
+```{r healthboards join}
+healthboards <- read.csv(here("data", "healthboards.csv"))
+
+join_ScotQP <- full_join(HB_fixed, healthboards)
+```
+
+I want to clean up the dataframe a bit, only including the columns I find relevant.
+
+```{r more cleaning}
+clean_join <- join_ScotQP %>% 
+  select(PaidDateMonth, HB, HBName, BNFItemDescription, NumberOfPaidItems:PaidDateMonth)
+```
+
+First visualisation: Table depicting Total Number of Prescriptions made by all Scottish Healthboards across the timeframe.
+
+```{r most prescribing hb table}
+hb_most_prescriptions <- clean_join %>%
+  mutate(Prescription = case_when(
+    str_detect(BNFItemDescription, "METHADONE") ~ "METHADONE",
+    str_detect(BNFItemDescription, "BUPRENORPHINE") ~ "BUPRENORPHINE",
+    TRUE ~ NA_character_)) # creating new column to give medication label of methadone or buprenorphine (more grouping-friendly)
+  
+mp_table <- hb_most_prescriptions %>% 
+  group_by(Prescription, HBName) %>%
+  summarise(sum_PQ = sum(PaidQuantity, na.rm = TRUE)) %>%
+  arrange(desc(sum_PQ)) %>%
+  gt() %>% #begin table formatting
+  cols_label(HBName = "Health Board", sum_PQ = "Total Prescriptions") %>% #user-friendly column names
+  fmt_number(columns = sum_PQ, decimals = 0) %>%
+  cols_align(align = "center", columns = c(HBName, sum_PQ)) %>%
+  tab_header(
+  # Adding a title and subtitle
+  title = "Total Number of Opioid Substitution Prescriptions for each Scottish Healthboard from 2018-2023",
+    subtitle = "Data adapted from Open Data NHS Scotland") %>%
+  grand_summary_rows(columns = sum_PQ,
+                     fns = list("Grand Total" = ~sum(., na.rm = TRUE)),
+                     fmt = list(~ fmt_number(., decimals = 0)))
+
+mp_table
+```
+
+NHS Lothian and Greater Glasgow and Clyde are at the top, which I expected due to them being main cities. 
+
+Varying proportions of methadone and buprenorphine for certain healthboards, like NHS Tayside and NHS Grampian may suggest preference of treatment or varying stages of substance abuse in the population (for example, serious and long-term substance misusers may become desensitised to methadone more quickly, and it becomes ineffective, requiring a different treatment option).
+
+I would next like to more clearly see the trend in prescriptions over the years, so I opted for using a faceted line graph.
+
+VISUALISATION 2: LINE GRAPH SHOWING TREND OF OS PRESCRIPTION ACROSS SCOTLAND DURING TIMEFRAME
+
+```{r plotting trend}
+paid_quantity <- clean_join %>% 
+  group_by(PaidDateMonth, HBName) %>% 
+  summarise(sum_prescription = sum(PaidQuantity))
+
+plot1 <- paid_quantity %>% 
+  ggplot(aes(x = PaidDateMonth, y = sum_prescription, colour = HBName)) +
+  geom_line() +
+  facet_wrap(~HBName, scales = "free") +
+  theme_dark() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  #Adding title, subtitle, axis labels and user-friendly legend name
+  labs(title = "Trend of Opioid Substitution Prescription for each Scottish Healthboard from 2018-2023",
+       subtitle = "Data adapted from Open Data NHS Scotland",
+       x = "Year",
+       y = "Number of Prescriptions",
+       color = "Healthboard")
+
+plot1
+
+#The plot does not print very well, but opening it a new window shows it all clearly
+```
+Most HBs seem to decrease in the number of OS prescriptions given over the 5 year period, with exemptions from NHS Greater Glasgow and Clyde, for example, seeming to have increased slightly over time.
+
+A lot of HBs (Borders, Grampian, Glasgow, Lothian, Tayside etc.) seem to hit peak number of prescriptions during 2020 period. This would have been during the COVID-19 pandemic. Could be suggesting that substance misuse increased (potentially alongside the worsening of mental health), so more people required OSP.
+
+NHS Lothian has an interesting pattern (bell shape): the number of prescriptions seem to increase from 2018-2020, peak, then decrease from 2020 until 2023. I'm curious about the data for 2020, since this was when the first lockdown occured. What is especially important to note is that to be prescribed does not mean to receive, and so I wonder how these two lines would match up for NHS Lothian, considering its shape.
+
+VISUALISATION 3: COMBINED PLOT DEPICTING TREND IN NUMBER OF PRESCRIPTIONS AND NUMBER OF PRESCRIPTIONS ACTUALLY DISPENSED IN NHS LOTHIAN DURING THE TIMEFRAME
+```{r lothian-specific plots}
+#Creating a dataframe for dispensed OSP with the same format as the dataframe for prescriptions
+lothian_npi <- clean_join %>% 
+  filter(HBName == "NHS Lothian") %>% 
+  group_by(PaidDateMonth) %>% 
+  summarise(sum_npi = sum(NumberOfPaidItems))
+
+#filtering the existing dataframe for prescriptions to give just NHS Lothian data
+lothian_pq <- paid_quantity %>%
+  filter(HBName == "NHS Lothian")
+
+
+# Creating the two plots
+lothian_plot_pq <- lothian_pq %>%
+  ggplot(aes(x = PaidDateMonth, y = sum_prescription)) +
+  geom_line() +
+  labs(title = "Opioid Substitution Prescriptions under NHS Lothian from 2018-2023", x = "Year", y = "Number of Prescriptions")
+
+lothian_plot_npi <- lothian_npi %>%
+  ggplot(aes(x = PaidDateMonth, y = sum_npi)) +
+  geom_line() +
+  labs(title = "Number of Opioid Substitution Prescriptions Dispensed under NHS Lothian from 2018-2023", x = "Year", y = "Number of Dispensed Prescriptions")
+
+
+#And combining the two onto one plot
+combined <- grid.arrange(lothian_plot_pq, lothian_plot_npi, ncol = 1)
+
+combined
+```
+
+Very interestingly, number of dispensed prescriptions seems so follow number of prescriptions in 2018 and 2019, but during 2020, it would seem that as number of dispensed prescriptions did the opposite, despite a significant peak in number of opioid substitution prescriptions.
+
+This may then be indicative of the idea that substance misuse worsened during the pandemic, and thus, prescriptions for opioid substitutions went up, but the restrictive element of lockdowns provided a barrier for engagement whereby those being prescribed the medication could not, or were not able to go to GP/Pharmacy and pick up or renew their prescriptions. 
+
+
+That concludes my report.
+
+
+AI: The use of generative AI was adopted to explain errors and in one case offer guidance on whether a piece of code generated was "DRY".
